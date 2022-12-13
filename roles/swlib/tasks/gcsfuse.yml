@@ -1,0 +1,57 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+- name: gcsfuse | gcloud install
+  include_tasks: gcloud.yml
+
+- name: gcsfuse | Install gcsfuse dependencies
+  become: yes
+  become_user: root
+  yum:
+    name: fuse
+
+- name: gcsfuse | Install gcsfuse
+  become: yes
+  become_user: root
+  yum:
+    name: "https://github.com/GoogleCloudPlatform/gcsfuse/releases/download/v{{ gcsfuse_version }}/gcsfuse-{{ gcsfuse_version }}-1.x86_64.rpm"
+    lock_timeout: 180
+
+- name: gcsfuse | Copy service account key with owner and permissions
+  copy:
+    src: "{{ swlib_gcs_service_account_file }}"
+    dest: /root/gcp-swlib-credentials.json
+    owner: root
+    group: root
+    mode: a=rwx
+  when: swlib_gcs_service_account_file != ""
+
+- name: gcsfuse | Mount gcs-swlib-storage using service_account
+  mount:
+    path: "{{ swlib_path }}"
+    src: "{{ swlib_mount_src }}"
+    fstype: gcsfuse
+    opts: ro,user,allow_other,key_file=/root/gcp-swlib-credentials.json
+    state: mounted
+  when: swlib_gcs_service_account_file is defined
+
+- name: gcsfuse | Mount gcs-swlib-storage with instance service_account
+  mount:
+    path: "{{ swlib_path }}"
+    src: "{{ swlib_mount_src }}"
+    fstype: gcsfuse
+    opts: ro,user,allow_other
+    state: mounted
+  when: swlib_gcs_service_account_file is not defined

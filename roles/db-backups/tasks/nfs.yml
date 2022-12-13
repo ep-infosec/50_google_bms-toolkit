@@ -1,0 +1,50 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+- name: nfs_backups | Install NFS mount utility
+  become: yes
+  become_user: root
+  yum:
+    name: nfs-utils
+    state: present
+    lock_timeout: 180
+  when: ansible_os_family == "RedHat"
+
+- name: nfs_backups | Ensure rpcbind is running as configured.
+  become: yes
+  become_user: root
+  service:
+    name: rpcbind
+    state: started
+    enabled: true
+  when: ansible_os_family == "RedHat"
+
+- name: nfs_backups | Create a nfs backups mount folder
+  file:
+    path: "{{ backup_dest }}"
+    state: directory
+    mode: u=rwx,go=rx
+    owner: "{{ oracle_user}}"
+    group: backupdba
+
+- name: nfs_backups | Mount NFS share (backup)
+  become: yes
+  become_user: root
+  mount:
+    fstype: nfs
+    name: "{{ backup_dest }}"
+    opts: "user,vers=3,_netdev,rsize=8192,wsize=8192,timeo=14,intr"
+    src: "{{ backup_src }}"
+    state: mounted

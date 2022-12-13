@@ -1,0 +1,150 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+- name: Validate OS family and version
+  assert:
+    that:
+      - "ansible_os_family == '{{ os_family_supported }}'"
+      - "ansible_distribution_version is version_compare('{{ os_min_supported_version }}', '>=')"
+  tags: oscheck
+
+- name: Validate architecture
+  assert:
+    that: "ansible_userspace_architecture == 'x86_64'"
+  tags: oscheck
+
+- name: Ensure yum is not running, send Ctrl-C if it is
+  shell: pidof -x /usr/bin/yum /bin/yum | xargs -t -r -n 1 kill -INT
+  tags: os_packages
+
+- name: Remove ntpd package
+  package:
+    name: ntp
+    state: absent
+    lock_timeout: 180
+  tags: ntp
+
+- name: Remove ntp conf
+  file:
+    path: /etc/ntp.conf
+    state: absent
+  tags: ntp
+
+- name: Disable avahi daemon
+  systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  when:
+    cluster_name is defined
+  ignore_errors: yes
+  with_items:
+    - avahi-daemon.socket
+    - avahi-daemon.service
+  tags: cvu
+
+- name: Install required base OS packages
+  package:
+    name: "{{ packages }}"
+    state: present
+    lock_timeout: 180
+  tags: os_packages
+
+- name: Add ntp preferred server
+  blockinfile:
+    path: /etc/chrony.conf
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    insertafter: '^server '
+    block: "server {{ ntp_preferred }} prefer iburst"
+    state: "{{ (ntp_preferred != \"\" ) | ternary('present', 'absent') }}"
+  notify: restart chronyd
+  tags: ntp
+
+- name: Make sure chronyd is running
+  service:
+    name: chronyd
+    state: started
+    enabled: yes
+  tags: ntp
+
+- name: Generate /etc/hosts
+  blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    block: |
+      {% for host in groups['all'] %}
+      {% if cluster_domain is defined %}
+      {{ hostvars[host]['ansible_ssh_host'] }}    {{ host }}.{{ cluster_domain }}  {{ host }}
+      {% else %}
+      {{ hostvars[host]['ansible_ssh_host'] }}    {{ host }}
+      {% endif %}
+      {% endfor %}
+      {% for host in groups['all'] %}
+      {% if hostvars[host]['vip_ip'] is defined %}
+      {% if cluster_domain is defined %}
+      {{ hostvars[host]['vip_ip'] }}    {{ hostvars[host]['vip_name'] }}.{{ cluster_domain }}  {{ vip_name }}
+      {% else %}
+      {{ hostvars[host]['vip_ip'] }}    {{ hostvars[host]['vip_name'] }}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+      {% for host in groups['all'] %}
+      {% if loop.first %}
+      {% if scan_name is defined %}
+      {% for h in hostvars[host] %}
+      {% if 'scan_ip' in h %}
+      {% if cluster_domain is defined %}
+      {{ hostvars[host][h] }}    {{ scan_name }}.{{ cluster_domain }}  {{ scan_name }}
+      {% else %}
+      {{ hostvars[host][h] }}    {{ scan_name }}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+  when: cluster_type == "RAC"
+  tags: etchosts
+
+# cleanup /etc/hosts to solve a listener related issue, ora listener binds to hostname's IP.
+- name: Remove all 127.0.0.1 lines from /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.0\.1'
+    state: absent
+  tags: etchosts
+
+- name: Add fqdn to /etc/hosts if needed
+  lineinfile:
+    path: /etc/hosts
+    regexp: '.*{{ ansible_fqdn }}$'
+    line: "{{ ansible_ssh_host }} {{ ansible_hostname }} {{ ansible_fqdn }}"
+    state: present
+  when: cluster_type in ("NONE", "DG")
+  tags: etchosts,fqdn
+
+- name: Add localhost to /etc/hosts if needed
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.0\.1'
+    line: "127.0.0.1 localhost localhost.localdomain"
+    state: present
+  tags: etchosts
+
+- name: prep host | create swap
+  include_tasks: swap.yml
+  when:
+    - swap_blk_device is defined
+    - swap_blk_device|length > 0

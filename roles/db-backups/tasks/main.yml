@@ -1,0 +1,104 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+- name: Create required directories
+  become: yes
+  become_user: "{{ oracle_user }}"
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: u=wrx,go=
+  with_items:
+    - "{{ scripts_dir }}"
+    - "{{ logs_dir }}"
+  tags: db-backups,add-backups
+
+- name: backup location | nfs mount
+  include_tasks: nfs.yml
+  when:
+    - backup_mount_src is defined
+    - backup_mount_path is defined
+
+- name: Copy backup scripts to target server
+  become: yes
+  become_user: "{{ oracle_user }}"
+  template:
+    src: "{{ item }}.j2"
+    dest: "{{ scripts_dir }}/{{ item }}"
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: u=wrx,go=
+  with_items:
+    - "rman_full_backup.sh"
+    - "rman_arch_backup.sh"
+    - "rman_restore_example.sh"
+  tags: db-backups,add-backups
+
+- name: Schedule full backups
+  become: yes
+  become_user: "{{ oracle_user }}"
+  cron:
+    name: "{{ oracle_sid }} RMAN weekly LEVEL={{ item.level }}"
+    weekday: "{{ item.days }}"
+    hour: "{{ full_bu_start_hour }}"
+    minute: "{{ full_bu_start_min }}"
+    user: "{{ oracle_user }}"
+    job: "{{ scripts_dir }}/rman_full_backup.sh {{ oracle_sid }} {{ item.level }} {{ rman_db_bu_redundancy }} {{ rman_arch_redundancy }}"
+  with_items:
+     - {level: 0, days: '{{ full_bu_level0_day }}' }
+     - {level: 1, days: '{{ full_bu_level1_days }}' }
+  tags: db-backups,add-backups
+
+- name: Schedule archived redo log backups
+  become: yes
+  become_user: "{{ oracle_user }}"
+  cron:
+    name: "{{ oracle_sid }} ARCH backups"
+    minute: "{{ arch_bu_start_min }}"
+    user: "{{ oracle_user }}"
+    job: "{{ scripts_dir }}/rman_arch_backup.sh {{ oracle_sid }} {{ rman_arch_redundancy }} {{ rman_archs_online_days }}"
+  tags: db-backups,add-backups
+
+- name: Run initial full backup
+  become: yes
+  become_user: "{{ oracle_user }}"
+  shell: |
+    export PATH={{ oracle_home }}/bin:/usr/local/bin:${PATH}
+    {{ scripts_dir }}/rman_full_backup.sh {{ oracle_sid }} 0 {{ rman_db_bu_redundancy }} {{ rman_arch_redundancy }}
+  when: run_initial_bu|bool
+  register: full_backup
+  tags: db-backups,run-backups
+
+- name: Run initial archivelog backup
+  become: yes
+  become_user: "{{ oracle_user }}"
+  shell: |
+    export PATH={{ oracle_home }}/bin:/usr/local/bin:${PATH}
+    {{ scripts_dir }}/rman_arch_backup.sh {{ oracle_sid }} {{ rman_arch_redundancy }} {{ rman_archs_online_days }}
+  when: run_initial_bu|bool
+  register: arch_backup
+  tags: db-backups,run-backups
+
+- name: Backup execution results
+  debug:
+    msg: "{{ item }}"
+    verbosity: 1
+  when: run_initial_bu|bool
+  with_items:
+    - "{{ full_backup }}"
+    - "{{ arch_backup }}"
+  tags: db-backups,run-backups
